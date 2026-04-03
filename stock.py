@@ -50,6 +50,15 @@ def fetch_stock_data(ticker, start, end):
     return df
 
 @st.cache_data(ttl=3600)
+def fetch_batch_data(tickers_list, start, end):
+    """批量下載多檔股票，避免 YFRateLimitError"""
+    try:
+        df = yf.download(tickers_list, start=start, end=end, interval="1d", group_by='ticker', threads=True)
+        return df
+    except:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
 def get_stock_news(ticker):
     """透過 Google News RSS 取得近期股票新聞"""
     try:
@@ -199,27 +208,44 @@ with tab_screener:
     else:
         with st.spinner("正在背景掃描並分析 10 檔股票數據，請稍候... (資料已採用快取，首次載入較久)"):
             screener_data = []
+            tickers_list = list(stock_dict.values())
+            
+            # 使用 yf.download 批量下載以避免 RateLimitError
+            start_str = (end_date - timedelta(days=40)).strftime('%Y-%m-%d')
+            end_str = (end_date + timedelta(days=1)).strftime('%Y-%m-%d')
+            batch_df = fetch_batch_data(tickers_list, start_str, end_str)
+
             for name, ticker in stock_dict.items():
-                # 只抓取過去一個月的資料來抓最新兩天算漲跌幅
-                df_scan = fetch_stock_data(ticker, (end_date - timedelta(days=40)).strftime('%Y-%m-%d'), (end_date + timedelta(days=1)).strftime('%Y-%m-%d'))
-                if not df_scan.empty and len(df_scan) >= 2:
-                    df_scan['RSI'] = calculate_rsi(df_scan)
-                    
-                    latest = df_scan.iloc[-1]
-                    prev = df_scan.iloc[-2]
-                    
-                    close_price = latest['Close']
-                    pct_change = ((close_price - prev['Close']) / prev['Close']) * 100
-                    latest_rsi = latest['RSI']
-                    
-                    screener_data.append({
-                        "股票名稱": name,
-                        "代碼": ticker,
-                        "最新收盤價": round(close_price, 2),
-                        "單日漲跌 (% )": round(pct_change, 2),
-                        "RSI (14)": round(latest_rsi, 2),
-                        "動能狀態": get_momentum_status(latest_rsi)
-                    })
+                if not batch_df.empty:
+                    # 獲取單一股票的 DataFrame 並複製一份以免修改到原快取資料
+                    try:
+                        if len(tickers_list) > 1:
+                            df_scan = batch_df[ticker].dropna().copy()
+                        else:
+                            df_scan = batch_df.dropna().copy()
+                    except KeyError:
+                        continue
+                        
+                    if not df_scan.empty and len(df_scan) >= 2:
+                        # 為了計算 RSI 必須獨立保留一份並消除時區
+                        df_scan.index = df_scan.index.tz_localize(None)
+                        df_scan['RSI'] = calculate_rsi(df_scan)
+                        
+                        latest = df_scan.iloc[-1]
+                        prev = df_scan.iloc[-2]
+                        
+                        close_price = latest['Close']
+                        pct_change = ((close_price - prev['Close']) / prev['Close']) * 100
+                        latest_rsi = latest['RSI']
+                        
+                        screener_data.append({
+                            "股票名稱": name,
+                            "代碼": ticker,
+                            "最新收盤價": round(close_price, 2),
+                            "單日漲跌 (% )": round(pct_change, 2),
+                            "RSI (14)": round(latest_rsi, 2),
+                            "動能狀態": get_momentum_status(latest_rsi)
+                        })
             
             if screener_data:
                 sdf = pd.DataFrame(screener_data)
